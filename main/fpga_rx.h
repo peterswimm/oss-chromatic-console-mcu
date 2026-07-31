@@ -13,6 +13,7 @@ typedef enum {
     kRxCmd_Reserved        = 0x7,
     kRxCmd_StatusExtended  = 0x8,
     kRxCmd_BGPalette       = 0x9,
+    kRxCmd_MidiOut         = 0xA, // RetroPlug MIDI-out / MasterSync: 1 captured byte
 
     kNumRxCmds,
 } RxIDs_t;
