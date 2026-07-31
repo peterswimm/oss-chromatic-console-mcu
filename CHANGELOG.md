@@ -1,3 +1,17 @@
+## v0.14.0
+
+### Note
+Requires FPGA v19.0 or newer (RetroPlug port). Proof-of-concept; not yet
+hardware-validated. See docs/retroplug-sync.md.
+
+### Added
+- RetroPlug LSDj sync relay: a new "rpsync" console command lets the host
+  bridge (RetroPlug, running Ableton Link) stream LSDj sync bytes over the USB
+  CDC / console; the MCU forwards them to the FPGA linksync block via a new
+  0x8F-protocol command (FPGA RX address 0xE).
+- RetroPlug MIDI-out: captured Game Boy link bytes (FPGA TX channel 0xA) are
+  forwarded to the host as "RPMIDI:<hex>" console lines (MasterSync / MI.OUT).
+
 ## v0.13.4
 
 ### Note

@@ -7,11 +7,13 @@
 #include "crc8_sae_j1850.h"
 #include "dpad_ctl.h"
 #include "driver/uart.h"
+#include "esp_console.h"
 #include "esp_err.h"
 #include "esp_log.h"
 #include "fpga_common.h"
 #include "frameblend.h"
 #include "freertos/FreeRTOS.h"
+#include "freertos/queue.h"
 #include "freertos/task.h"
 #include "low_batt_icon_ctl.h"
 #include "palette.h"
@@ -22,6 +24,7 @@
 
 #include <stddef.h>
 #include <stdint.h>
+#include <stdlib.h>
 #include <string.h>
 
 enum {
@@ -32,6 +35,7 @@ enum {
     kFlag_PokeButton,
     kFlag_SetPaletteStyle,
     kFlag_RequestBGPD,
+    kFlag_Sync,
     kNumFlags,
 };
 
@@ -43,9 +47,16 @@ typedef enum {
     kTxFlag_PokeButton       = (1 << kFlag_PokeButton),
     kTxFlag_SetPaletteStyle  = (1 << kFlag_SetPaletteStyle),
     kTxFlag_RequestBGPD      = (1 << kFlag_RequestBGPD),
+    kTxFlag_Sync             = (1 << kFlag_Sync),
 
-    kTxFlag_AllFlags         = ((1 << kNumFlags) - 1),
+    // RetroPlug sync is host-driven (not part of the periodic SendAll refresh).
+    kTxFlag_AllFlags         = (((1 << kNumFlags) - 1) & ~kTxFlag_Sync),
 } TxFlags_t;
+
+// Queue of RetroPlug sync payloads ({mode, serial byte} packed as a uint16),
+// drained by the TX task so only it writes the FPGA UART.
+#define FPGA_SYNC_QUEUE_LEN 64
+static QueueHandle_t _syncQueue = NULL;
 
 typedef enum {
     kTxCmd_Reserved0        = 0x0,
@@ -59,6 +70,7 @@ typedef enum {
     kTxCmd_BGPaletteCtl     = 0xB,
     kTxCmd_SpritePaletteCtl = 0xC,
     kTxCmd_ReqBGPD          = 0xD,
+    kTxCmd_Sync             = 0xE, // RetroPlug LSDj sync: {mode, GB-serial byte}
 
     kNumTxCmds,
 } TxIDs_t;
@@ -78,6 +90,11 @@ void FPGA_TxTask(void *arg)
 
     xEventGroupHandle = xEventGroupCreateStatic( &xCreatedEventGroup );
 
+    if (_syncQueue == NULL)
+    {
+        _syncQueue = xQueueCreate(FPGA_SYNC_QUEUE_LEN, sizeof(uint16_t));
+    }
+
     FPGA_Tx_SendAll();
     FPGA_Tx_Resume();
 
@@ -96,11 +113,23 @@ void FPGA_TxTask(void *arg)
 
         const EventBits_t EventBits = xEventGroupWaitBits(
             xEventGroupHandle,
-            (kTxFlag_WriteBrightness | kTxFlag_SetSysCtl | kTxFlag_RequestFWVer | kTxFlag_PokeButton | kTxFlag_SetPaletteStyle | kTxFlag_RequestBGPD),
+            (kTxFlag_WriteBrightness | kTxFlag_SetSysCtl | kTxFlag_RequestFWVer | kTxFlag_PokeButton | kTxFlag_SetPaletteStyle | kTxFlag_RequestBGPD | kTxFlag_Sync),
             pdTRUE, // DO clear the flags to complete the request
             pdFALSE, // Any bit will do
             pdMS_TO_TICKS(100)
         );
+
+        if ((EventBits & kTxFlag_Sync) == kTxFlag_Sync)
+        {
+            // Drain the RetroPlug sync queue, injecting each byte onto the link.
+            uint16_t payload;
+            while ((_syncQueue != NULL) && (xQueueReceive(_syncQueue, &payload, 0) == pdPASS))
+            {
+                uint16_t data = payload; // {mode<<8 | serial byte}; SetupTxBuffer swaps to big-endian
+                const size_t Size = SetupTxBuffer(TxBuffer, kTxCmd_Sync, sizeof(data), (void*)&data);
+                (void) uart_write_bytes(UART_NUM_1, TxBuffer, Size);
+            }
+        }
 
         if ((EventBits & kTxFlag_WriteBrightness) == kTxFlag_WriteBrightness)
         {
@@ -222,6 +251,59 @@ void FPGA_Tx_PokeButtons(void)
 void FPGA_Tx_WritePaletteStyle(void)
 {
    (void) xEventGroupSetBits(xEventGroupHandle, kTxFlag_SetPaletteStyle);
+}
+
+void FPGA_Tx_SendSync(uint8_t mode, uint8_t serial_byte)
+{
+    if (_syncQueue == NULL)
+    {
+        return;
+    }
+    const uint16_t payload = ((uint16_t)mode << 8) | serial_byte;
+    if (xQueueSend(_syncQueue, &payload, 0) == pdPASS)
+    {
+        (void) xEventGroupSetBits(xEventGroupHandle, kTxFlag_Sync);
+    }
+    else
+    {
+        ESP_LOGW(TAG, "sync queue full; dropped byte 0x%02x", serial_byte);
+    }
+}
+
+// Console command: "rpsync <mode_hex> <byte_hex> [byte_hex ...]"
+// The RetroPlug host bridge sends this over the CDC/console to stream LSDj sync
+// bytes. Mirrors the "poke" button command pattern.
+static int rpsync_command(int argc, char **argv)
+{
+    if (argc < 3)
+    {
+        ESP_LOGE(TAG, "rpsync expects <mode_hex> <byte_hex> [byte_hex ...]");
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    const uint8_t mode = (uint8_t)strtol(argv[1], NULL, 16);
+    for (int i = 2; i < argc; i++)
+    {
+        const uint8_t b = (uint8_t)strtol(argv[i], NULL, 16);
+        FPGA_Tx_SendSync(mode, b);
+    }
+    return ESP_OK;
+}
+
+void FPGA_Tx_RegisterCommands(void)
+{
+    esp_console_cmd_t command = {
+        .command = "rpsync",
+        .help = "RetroPlug: inject LSDj sync bytes onto the Game Boy link",
+        .func = &rpsync_command,
+        .argtable = NULL,
+    };
+
+    esp_err_t err;
+    if ((err = esp_console_cmd_register(&command)) != ESP_OK)
+    {
+        ESP_LOGE(TAG, "Registering '%s' command failed: %s", command.command, esp_err_to_name(err));
+    }
 }
 
 static size_t SetupTxBuffer(uint8_t *const pBuffer, TxIDs_t eID, uint8_t Len, void* pData)

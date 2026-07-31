@@ -23,6 +23,7 @@
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
+#include <stdio.h>
 #include <string.h>
 
 typedef enum {
@@ -369,6 +370,15 @@ static void ProcessMessage(const RxMsg_t *const pMsg)
         }
         case kRxCmd_Reserved:
         {
+            break;
+        }
+        case kRxCmd_MidiOut:
+        {
+            // RetroPlug MIDI-out / MasterSync: a byte LSDj clocked out on the
+            // link, captured by the FPGA. Forward it to the host over the
+            // console as a labeled line the RetroPlug bridge parses. (A raw
+            // binary channel would be cleaner long-term; see docs.)
+            printf("RPMIDI:%02X\n", pMsg->Payload[0]);
             break;
         }
         case kRxCmd_BGPalette:

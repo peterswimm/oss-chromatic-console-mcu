@@ -344,6 +344,8 @@ void app_main(void)
 
     ESP_ERROR_CHECK(esp_console_new_repl_uart(&ReplHWConfig, &ReplConfig, &pRepl));
     esp_console_register_help_command();
+    // RetroPlug host bridge: "rpsync" command streams LSDj sync bytes to the FPGA.
+    FPGA_Tx_RegisterCommands();
     // All commands must be registered prior to starting the REPL
     ESP_ERROR_CHECK(esp_console_start_repl(pRepl));
 
