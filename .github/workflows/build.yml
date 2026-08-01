@@ -1,0 +1,22 @@
+name: build
+
+# Build the Chromatic MCU firmware with ESP-IDF v5.3 (target esp32) — the same toolchain the
+# README pins. The IDF component manager fetches the lvgl managed component during the build.
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+jobs:
+  idf-build:
+    name: idf.py build (esp32, v5.3)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: ESP-IDF build
+        uses: espressif/esp-idf-ci-action@v1
+        with:
+          esp_idf_version: v5.3
+          target: esp32
+          path: '.'
